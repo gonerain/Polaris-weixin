@@ -28,6 +28,37 @@ class Executor:
 
 
 class CoreTests(unittest.TestCase):
+    def test_large_tool_results_reach_generation_and_review_with_redaction(self):
+        key = 'sk-full-result-test-secret'
+        payload = {'rows': [{'id': index, 'text': '正文' * 800 + str(index)}
+                            for index in range(25)], 'secret': key}
+        expected = {**payload, 'secret': '[已隐藏密钥]'}
+
+        class RecordingModel(FakeModel):
+            def redact(self, value):
+                return DeepSeek.redact(self, value)
+            def complete(self, messages, *args, **kwargs):
+                self.messages = list(messages)
+                return super().complete(messages, *args, **kwargs)
+            def review(self, request, draft, evidence, cancel, timeout=30):
+                self.evidence = evidence
+                return {'needs_tools': False, 'reply': draft, 'reason': ''}
+
+        class LargeResult(Executor):
+            def execute(self, name, args, cancel):
+                return payload
+
+        model = RecordingModel([{'tool_calls': [tool('components', {})]},
+                                {'content': '已查询'}])
+        model._key = key
+        WeixinAgent(model).run('查询', [], LargeResult(), threading.Event())
+        content = next(row['content'] for row in model.messages if row.get('role') == 'tool')
+        self.assertGreater(len(content), 12000)
+        self.assertEqual(json.loads(content), expected)
+        self.assertEqual(model.evidence[0]['result'], expected)
+        self.assertNotIn(key, content)
+        self.assertNotIn(key, json.dumps(model.evidence))
+
     def test_review_keeps_original_context_after_tool_rounds(self):
         class Reviewed(FakeModel):
             def review(self, request, draft, evidence, cancel, timeout=30):

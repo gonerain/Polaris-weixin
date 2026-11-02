@@ -40,32 +40,7 @@ class WeixinAgent:
         return redact(text) if redact else text
 
     def _tool_content(self, text):
-        text = self._safe(text)
-        if len(text) <= 12000:
-            return text
-        # Keep a valid JSON envelope instead of cutting through a quoted value.
-        # Shorten individual values first so identifiers in later rows survive.
-        def compact(value):
-            if isinstance(value, str):
-                return value if len(value) <= 1000 else value[:1000] + '…（已截短）'
-            if isinstance(value, list):
-                return [compact(item) for item in value[:20]]
-            if isinstance(value, dict):
-                return {key: compact(item) for key, item in value.items()}
-            return value
-        envelope = {'truncated': True, 'notice': '内容或列表已截短，以下不是完整结果。',
-                    'data': compact(json.loads(text))}
-        serialized = json.dumps(envelope, ensure_ascii=False)
-        if len(serialized) <= 12000:
-            return serialized
-        envelope.pop('data')
-        preview = text[:10000]
-        while True:
-            envelope['preview'] = preview
-            serialized = json.dumps(envelope, ensure_ascii=False)
-            if len(serialized) <= 12000:
-                return serialized
-            preview = preview[:len(preview)//2]
+        return self._safe(text)
 
     def run(self, text, history, tools_executor, cancel):
         started = time.monotonic()
