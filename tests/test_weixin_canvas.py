@@ -12,10 +12,19 @@ if __name__ != '__main__':
             import importlib.util
             if importlib.util.find_spec('PySide6') is None:
                 self.skipTest('Optional PySide6 is not installed')
-            result = subprocess.run([sys.executable, str(Path(__file__).resolve())],
-                env=dict(os.environ, QT_QPA_PLATFORM='offscreen', QT_QUICK_BACKEND='software'),
-                capture_output=True, text=True, timeout=40)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            # Each case starts and tears down an entire Qt desktop. Give it the
+            # same QML-engine lifetime as the application rather than sharing
+            # native process-global caches across five independent hosts.
+            command = [sys.executable, str(Path(__file__).resolve())]
+            env = dict(os.environ, QT_QPA_PLATFORM='offscreen', QT_QUICK_BACKEND='software')
+            listing = subprocess.run(command + ['--list-cases'], env=env, capture_output=True, text=True,
+                                     timeout=15, check=True)
+            cases = listing.stdout.splitlines()
+            self.assertTrue(cases)
+            for case in cases:
+                with self.subTest(case=case):
+                    result = subprocess.run(command + [case], env=env, capture_output=True, text=True, timeout=40)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 else:
     import json
     import tempfile
@@ -66,6 +75,8 @@ else:
             for target in ('window', 'canvas'):
                 for operation in self.runtime.status(target)['description']['operations']:
                     self.runtime.grant('user', target, operation)
+            from assistant_fixture import install
+            self.assistant = install(self.runtime)
             self.context = self.runtime.user_context('user')
             self.runtime.client('user').call('canvas', 'show', context=self.context)
             self.window = self.host._views[self.canvas.handle]
@@ -157,7 +168,7 @@ else:
             sys.path.insert(0, str(ROOT / 'integration_tests'))
             from test_weixin_agent_e2e import ScriptedModel, tool, call, TARGET, OPERATIONS
             from polaris_agent import Agent
-            from polaris_weixin.agent import WeixinAgent
+            from components.assistant.loop import AgentLoop as WeixinAgent
             agent = Agent(data_dir=Path(self.directory.name) / 'agent')
             self.runtime.install(dict(id=TARGET, name='Agent', version='1', platformApi=1,
                 entry=dict(mode='inprocess')), lambda: agent)
@@ -165,7 +176,7 @@ else:
             for name in agent.describe()['operations']:
                 self.runtime.grant('canvas', TARGET, name)
             row = agent.store.snapshot('fixture', 'ui', 'ui-session', title='画布联调会话')
-            self.component.agent.agent = WeixinAgent(ScriptedModel([
+            self.assistant.engine = WeixinAgent(ScriptedModel([
                 tool('help', component='Agent'), call('mark', session_id=row['id']), {'content': '画布会话已标记'},
                 tool('help', component='Agent'), call('unmark', session_id=row['id']), {'content': '画布会话已取消标记'}]))
             self.mount_by_picker()
@@ -201,8 +212,7 @@ else:
             self.runtime.install(dict(id='toy',name='Toy',version='1',platformApi=1,
                                       entry=dict(mode='inprocess')), lambda: toy)
             self.runtime.start_component('toy')
-            self.component.agent.agent = object()
-            self.component.agent.has_key = True
+            self.assistant.engine = object()
             self.mount_by_picker()
             bridge = next(iter(self.component._presentation._views.values()))[2]
             bridge.refresh(); QTest.qWait(30)
@@ -326,4 +336,8 @@ else:
             self.assertFalse(bridges[0].invoke('send', '{"text":"Denied"}'))
             self.assertEqual(len(self.fake.sent), 1)
 
-    unittest.main()
+    if '--list-cases' in sys.argv:
+        for test in unittest.defaultTestLoader.getTestCaseNames(WeixinCanvasIntegration):
+            print('WeixinCanvasIntegration.' + test)
+    else:
+        unittest.main()

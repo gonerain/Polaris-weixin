@@ -15,9 +15,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tests'))
 sys.path.insert(0, str(Path(os.environ['POLARIS_AGENT_REPO']) / 'plugins/agent'))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'plugins/weixin'))
 import test_weixin_component as fixtures
+from assistant_fixture import install, delivered_history, seed_history
 from polaris_agent import Agent
-from polaris_weixin.agent import WeixinAgent
-from polaris_weixin.model import ModelError
+from components.assistant.loop import AgentLoop as WeixinAgent
+from components.assistant.model import ModelError
 
 TARGET = 'org.polaris.agent'
 OPERATIONS = ('get', 'sessions', 'status', 'result', 'delivery', 'mark', 'unmark', 'send')
@@ -104,8 +105,9 @@ class WeixinAgentEndToEndTests(unittest.TestCase):
 
     def setUp(self):
         fixtures.WeixinComponentTests.setUp(self)
+        self.assistant = install(self.runtime)
         self.agent_component = Agent(data_dir=Path(self.directory.name) / 'agent')
-        self.runtime.install(dict(id=TARGET, name='Agent', version='1', platformApi=1,
+        self.runtime.install(dict(id=TARGET, name='Agent Bridge', version='1', platformApi=1,
                                   entry=dict(mode='inprocess')), lambda: self.agent_component)
         self.runtime.start_component(TARGET)
         self.host = Host(self.agent_component.bridge.endpoint)
@@ -136,7 +138,7 @@ class WeixinAgentEndToEndTests(unittest.TestCase):
 
     def enable(self, model):
         self.model = model
-        self.component.agent.agent = WeixinAgent(model)
+        self.assistant.engine = WeixinAgent(model)
         self.call('configure_agent', enabled=True,
                   allowed=[{'target': TARGET, 'operation': name} for name in OPERATIONS])
 
@@ -149,7 +151,8 @@ class WeixinAgentEndToEndTests(unittest.TestCase):
 
     def reply(self, count=1):
         replies = lambda: [m for m in self.fake.sent if not m['item_list'][0]['text_item']['text'].startswith('【任务结束】')]
-        self.wait(lambda: len(replies()) >= count and not self.component.agent.busy)
+        self.wait(lambda: (isinstance(self.model, ScriptedModel) and self.model.failure) or
+                  (len(replies()) >= count and not self.component.agent.busy))
         if isinstance(self.model, ScriptedModel) and self.model.failure:
             raise self.model.failure
         self.assertEqual(len(replies()), count)
@@ -179,7 +182,7 @@ class WeixinAgentEndToEndTests(unittest.TestCase):
         self.incoming('取消刚才的标记')
         self.assertEqual(self.reply(2), '已取消标记')
         self.assertFalse(self.agent_component.status(self.session)['marked'])
-        self.assertEqual(len(self.component.agent.history), 4)
+        self.assertEqual(len(delivered_history(self)), 4)
 
     def test_mark_on_last_round_and_model_timeout_after_write(self):
         for index, final in enumerate(({'content': '标记完成'}, self.model_timeout)):
@@ -200,7 +203,7 @@ class WeixinAgentEndToEndTests(unittest.TestCase):
         def await_result(messages):
             receipt = json.loads(messages[-1]['content'])
             self.wait(lambda: self.agent_component.delivery(receipt['id'])['status'] == 'accepted')
-            self.wait(lambda: self.agent_component.result(self.session) is not None)
+            self.wait(lambda: (self.agent_component.result(self.session) or {}).get('status') == 'completed')
             return call('delivery', delivery_id=receipt['id'])
         def verify_delivery(messages):
             self.assertEqual(json.loads(messages[-1]['content'])['status'], 'accepted')
@@ -219,6 +222,9 @@ class WeixinAgentEndToEndTests(unittest.TestCase):
         self.assertEqual(self.reply(), '测试任务已完成')
         self.assertEqual(len(self.host.commands), 1)
         self.assertEqual(self.host.commands[0]['sessionId'], 'fixture-a62bc0')
+        self.wait(lambda: self.agent_component.delivery('fixture-delivery').get('completionStatus') == 'delivered')
+        notifications = [m for m in self.fake.sent if m['item_list'][0]['text_item']['text'].startswith('【任务结束】')]
+        self.assertEqual(len(notifications), 1)
 
     def test_revoked_mark_is_reported_and_does_not_write(self):
         def denied(messages):
@@ -247,17 +253,17 @@ class WeixinAgentEndToEndTests(unittest.TestCase):
         self.assertEqual(self.host.commands, [])
         self.assertEqual(self.agent_component.store.deliveries, {})
 
-    def test_long_result_remains_parseable_and_identifies_truncation(self):
+    def test_long_bridge_result_remains_complete_and_parseable(self):
         self.agent_component.store.run_event(self.session, 'long', 'completed', '长回复"\\\n' * 5000)
         def inspect_result(messages):
             content = messages[-1]['content']
-            self.assertLessEqual(len(content), 12000)
+            self.assertGreater(len(content), 12000)
             result = json.loads(content)
-            self.assertTrue(result['truncated'])
-            return {'content': '结果较长，已截取'}
+            self.assertEqual(result['reply'], self.agent_component.result(self.session)['reply'])
+            return {'content': '长结果已核对'}
         self.enable(ScriptedModel([tool('help', component='Agent'), call('result', session_id=self.session), inspect_result]))
         self.incoming('读取长结果')
-        self.assertEqual(self.reply(), '结果较长，已截取')
+        self.assertEqual(self.reply(), '长结果已核对')
 
     def test_online_host_without_send_capability_cannot_receive_commands(self):
         self.agent_component.store.snapshot('fixture', 'host', 'fixture-a62bc0', canSend=False)
@@ -275,7 +281,7 @@ class WeixinAgentEndToEndTests(unittest.TestCase):
 
     @unittest.skipUnless(os.environ.get('POLARIS_WEIXIN_LIVE_MODEL') == '1', 'Opt-in real DeepSeek acceptance')
     def test_real_model_forwards_answer_and_previous_text_without_reconfirmation(self):
-        from polaris_weixin.model import DeepSeek
+        from components.assistant.model import DeepSeek
         wait = self.wait
         self.wait = lambda predicate, timeout=100: wait(predicate,timeout)
         self.enable(DeepSeek())
@@ -293,21 +299,21 @@ class WeixinAgentEndToEndTests(unittest.TestCase):
                           {'role':'assistant','content':'已了解目标和正文。'}],
                 '目标不变，正文改为“'+revised+'”，现在发送。',revised)]
         for index,(history,prompt,expected) in enumerate(cases,1):
-            self.component.agent.history=history
+            seed_history(self, history)
             self.incoming(prompt)
             reply=self.reply(index)
             self.assertEqual(len(self.host.commands),index,reply)
             command=self.host.commands[-1]
             self.assertEqual(command['mode'],'start',reply)
             self.assertEqual(command['text'],expected,reply)
-        self.component.agent.history=question+[{'role':'user','content':'start，'+body}]
+        seed_history(self, question+[{'role':'user','content':'start，'+body}])
         self.incoming('先不要发送，我只是想讨论演示面板使用蓝色还是灰色，简短说说你的看法。')
         reply=self.reply(len(cases)+1)
         self.assertEqual(len(self.host.commands),len(cases),reply)
 
     @unittest.skipUnless(os.environ.get('POLARIS_WEIXIN_LIVE_MODEL') == '1', 'Opt-in real DeepSeek acceptance')
     def test_real_model_multiturn_queries_marks_sends_and_unmarks(self):
-        from polaris_weixin.model import DeepSeek
+        from components.assistant.model import DeepSeek
         wait = self.wait
         self.wait = lambda predicate, timeout=100: wait(predicate, timeout)
         self.enable(DeepSeek())

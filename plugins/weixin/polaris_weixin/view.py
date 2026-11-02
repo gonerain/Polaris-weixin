@@ -125,7 +125,7 @@ class Bridge(QObject):
             data = self._context.call(self._component.port.id, 'get', {})
             data = dict(data)
             settings = data.pop('agent', {})
-            safe = {key: settings.get(key) for key in ('enabled', 'desiredEnabled', 'resumePending', 'busy', 'error', 'hasKey', 'model', 'allowed', 'queued')}
+            safe = {key: settings.get(key) for key in ('enabled', 'desiredEnabled', 'resumePending', 'busy', 'error', 'providerAvailable', 'allowed', 'queued')}
             agent = json.dumps(safe, ensure_ascii=False)
             if agent != self._agent:
                 self._agent = agent
@@ -183,8 +183,10 @@ class Bridge(QObject):
                 chosen = {(row['target'], row['operation']) for row in selected}
                 previous = {(row['target'], row['operation']) for row in controller.allowed}
                 permissions = {(self._component.port.id, 'configure_agent')}
-                if params.get('enabled') is True or 'allowed' in params:
-                    permissions |= chosen | set(controller.task_operations(selected))
+                if params.get('enabled') is True:
+                    permissions |= set(controller.task_operations(selected))
+                elif 'allowed' in params:
+                    permissions |= chosen
                 self._local_input.call(operation, params, permissions=permissions, revoked=previous - chosen)
             else:
                 self._context.call(self._component.port.id, operation, params)

@@ -31,7 +31,7 @@ if __name__ == '__main__' and sys.argv[-1] == 'qt':
         revoked = False
         write_revoked = False
         catalog_calls = 0
-        settings = dict(enabled=False, desiredEnabled=False, busy=False, error='', hasKey=True, model='deepseek-v4-flash', allowed=[], queued=0)
+        settings = dict(enabled=False, desiredEnabled=False, busy=False, error='', providerAvailable=True, model='deepseek-v4-flash', allowed=[], queued=0)
         def call(self, target, operation, params):
             if self.revoked: raise ValueError('读取已撤销')
             if operation == 'get': return dict(agent=self.settings, state='connected', hasAccount=True, canSend=True, messages=[dict(text='测试消息', direction='in', time='12:00')])
@@ -68,11 +68,11 @@ if __name__ == '__main__' and sys.argv[-1] == 'qt':
         assert track.property('color').name() == ('#28a36b' if checked else '#a9b1b5')
         assert thumb.x() == (track.width() - thumb.width() - 3 if checked else 3)
     check_switch(False)
-    ctx.settings['hasKey'] = False
+    ctx.settings['providerAvailable'] = False
     bridge.refresh(); QTest.qWait(30)
     assert not toggle.property('enabled')
     assert track.property('opacity') == 0.4
-    ctx.settings['hasKey'] = True
+    ctx.settings['providerAvailable'] = True
     bridge.refresh(); QTest.qWait(30)
     assert track.property('opacity') == 1.0
 

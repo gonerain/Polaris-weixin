@@ -14,6 +14,8 @@ PYTHONPATH=plugins/weixin python -m unittest discover -s tests
 
 配置示例：`config.weixin.json`，从本仓库根目录使用 Polaris CLI 加载。测试使用已安装的公开 SDK；桌面端到端测试另外使用平台公开桌面宿主。
 
-二维码编码器 qrcode 8.2 随组件携带，安装源不需要修改宿主依赖。可选跨仓测试：设置 `POLARIS_AGENT_REPO` 为 Agent checkout 后运行 `python -m unittest discover -s integration_tests`。
+二维码编码器 qrcode 8.2 随组件携带，安装源不需要修改宿主依赖。可选跨仓测试：设置 `POLARIS_AGENT_REPO` 为 Agent Bridge checkout 后运行 `python -m unittest discover -s integration_tests`。
 
 本地平台开发可用 `python -m pip install -e /path/to/Polaris/next` 代替 Git 安装。
+
+自动回复使用 Polaris Agent 的回复契约。微信收发可单独运行；切换到拆分版时，旧自动回复任务需在微信设置中保存一次以授权新的提供方。

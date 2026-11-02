@@ -88,6 +88,9 @@ class WeixinComponentTests(unittest.TestCase):
         self.assertEqual(self.fake.calls, [])
         description = self.runtime.status(self.identity)['description']
         self.assertEqual(description['dependencies'], [])
+        self.assertFalse(description['operations']['generate_reply']['available'])
+        self.assertTrue(description['operations']['send'].get('available', True))
+        self.assertFalse(self.call('agent_settings')['providerAvailable'])
         self.assertEqual(description['views'][0]['adapter'], 'qt-quick-item')
         self.assertEqual(description['operations']['create_view']['profile'], 'qt-native')
         self.assertEqual(self.call('release_view', handle='missing'), {'released': False})

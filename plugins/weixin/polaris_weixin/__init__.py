@@ -19,15 +19,15 @@ def default_data_dir():
 
 
 class Weixin(Component):
-    def __init__(self, data_dir=None, transport=None, credentials=None, directory_id="collaboration", component_id="weixin", agent=None):
+    def __init__(self, data_dir=None, transport=None, credentials=None, directory_id="collaboration", component_id="weixin"):
         super().__init__()
         directory = Path(data_dir) if data_dir is not None else default_data_dir()
         self._presentation = None
         self.client = Client(credentials or CredentialStore(directory / 'credentials.bin'),
                              ChatStore(directory / 'chats'), transport, self._changed)
-        self.agent = AgentController(self.client, directory / "agent.json", self._changed, directory_id, component_id, agent)
+        self.agent = AgentController(self.client, directory / "agent.json", self._changed, directory_id, component_id, self.reply_provider, self.reply_available)
         self.completions = CompletionAdapter(self.client, directory / 'agent-completions.json', component_id)
-        self.agent.completions = self.completions
+
         self.client.on_text = self.agent.receive
         self.client.on_invalidate = self.agent.invalidate
         self.client.on_account_changed = self.agent.reset_conversation
@@ -38,6 +38,11 @@ class Weixin(Component):
                                       [{'name': name, 'access': 'write'} for name in ('configure_agent', 'new_conversation', 'complete_agent_run')] +
                                       [{'target': directory_id, 'name': name, 'access': 'read'} for name in ('discover', 'describe')] +
                                       [{'name': name, 'access': 'write'} for name in WRITES]}]
+        self.operation('generate_reply', access='write', requires={
+            'reply': dict(contract='polaris.agent.reply@1', access='write', group='agent'),
+            'status': dict(contract='polaris.agent.status@1', group='agent'),
+        })(self.generate_reply)
+        self.operation('reply_control', access='write')(self.reply_control)
         self.operation('get')(self.get)
         self.operation('agent_settings')(self.agent_settings)
         self.operation('agent_catalog')(self.agent_catalog)
@@ -72,6 +77,34 @@ class Weixin(Component):
         result = self.client.get()
         result['agent'] = self.agent_settings()
         return result
+
+    def reply_available(self):
+        return self.port and hasattr(self.port, 'bind') and self.port.bind(self.port.id, 'generate_reply')
+
+    def reply_provider(self):
+        if self.port is None or not hasattr(self.port, 'requirements'):
+            raise PlatformError('unavailable', '回复组件未就绪')
+        bindings = self.port.requirements('generate_reply')
+        return {name: bindings.handle(name) for name in ('reply', 'status')}
+
+    def generate_reply(self, text, conversation, parent, turn, allowed, ctx):
+        with self.agent.lock:
+            if (ctx.context.caller != self.port.id or self.agent.active_turn != turn or not self.agent.enabled
+                    or self.agent.cancel.is_set()):
+                raise PlatformError('cancelled', '这轮自动回复已结束')
+            self.agent.responder = self.reply_provider()['reply'].target
+        return ctx.call_required('reply', dict(text=text, conversation=conversation, parent=parent, turn=turn,
+                                               allowed=allowed, control='reply_control', max_reply_chars=2000))
+
+    def reply_control(self, turn, action, ctx, target=None, metadata=None, arguments=None):
+        with self.agent.lock:
+            active = (self.agent.active_turn == turn and self.agent.enabled and not self.agent.cancel.is_set()
+                      and getattr(self.agent, 'responder', None) == ctx.context.caller)
+            if action == 'active':
+                return {'active': active}
+            if not active or action != 'prepare':
+                raise PlatformError('denied', '无效的回复上下文')
+            return self.completions.prepare(target, metadata, arguments)
 
     def agent_settings(self):
         return self.agent.settings()
@@ -123,5 +156,5 @@ class Weixin(Component):
         super().stop()
 
 
-def create(data_dir=None, transport=None, credentials=None, directory_id="collaboration", component_id="weixin", agent=None):
-    return Weixin(data_dir, transport, credentials, directory_id, component_id, agent)
+def create(data_dir=None, transport=None, credentials=None, directory_id="collaboration", component_id="weixin"):
+    return Weixin(data_dir, transport, credentials, directory_id, component_id)
