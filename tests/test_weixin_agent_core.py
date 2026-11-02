@@ -3,6 +3,7 @@ from pathlib import Path
 import sys
 import threading
 import unittest
+import urllib.error
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'plugins/weixin'))
 from polaris_weixin.agent import WeixinAgent
 from polaris_weixin.model import DeepSeek, ModelError
@@ -192,7 +193,7 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(ModelError):
             WeixinAgent(CancelReview([{'content': '完成'}])).run('查询', [], Executor(), cancel)
 
-    def test_review_transport_forces_structured_verdict_and_rejects_invalid_reply(self):
+    def test_review_transport_uses_auto_selection_and_rejects_invalid_reply(self):
         class Response:
             def __init__(self, message): self.data = json.dumps({'choices': [{'message': message}]}).encode()
             def read(self, size):
@@ -208,10 +209,60 @@ class CoreTests(unittest.TestCase):
         model = DeepSeek('fake-key12345', opener)
         result = model.review('标记会话', '已标记', [], threading.Event())
         self.assertTrue(result['needs_tools'])
-        self.assertEqual(opener.payload['tool_choice']['function']['name'], 'review_reply')
+        self.assertNotIn('tool_choice', opener.payload)
+        self.assertIn('必须调用 review_reply', opener.payload['messages'][0]['content'])
         opener.message = {'content': '已完成'}
         with self.assertRaisesRegex(ModelError, '核对失败'):
             model.review('标记会话', '已标记', [], threading.Event())
+
+    def test_thinking_generation_and_review_do_not_force_tool_choice(self):
+        class Response:
+            def __init__(self, message):
+                self.data = json.dumps({'choices': [{'message': message}]}).encode()
+            def read(self, size):
+                result, self.data = self.data, b''
+                return result
+            def close(self): pass
+        class Opener:
+            def __init__(self): self.payloads = []
+            def open(self, request, timeout):
+                payload = json.loads(request.data)
+                self.payloads.append(payload)
+                if 'tool_choice' in payload:
+                    raise urllib.error.HTTPError(request.full_url, 400, 'unsupported', {}, None)
+                message = ({'content': '生成回复', 'reasoning_content': '生成思考'}
+                           if len(self.payloads) == 1 else
+                           {'tool_calls': [tool('review_reply', {
+                               'needs_tools': False, 'reply': '核查通过', 'reason': ''})],
+                            'reasoning_content': '核查思考'})
+                return Response(message)
+        opener = Opener()
+        result = WeixinAgent(DeepSeek('fake-key12345', opener)).run(
+            '你好', [], Executor(), threading.Event())
+        self.assertEqual(result.text, '核查通过')
+        self.assertEqual(len(opener.payloads), 2)
+        for payload in opener.payloads:
+            self.assertEqual(payload['thinking'], {'type': 'enabled'})
+            self.assertEqual(payload['reasoning_effort'], 'max')
+            self.assertNotIn('tool_choice', payload)
+        self.assertNotIn('思考', json.dumps(result.history, ensure_ascii=False))
+
+    def test_transport_errors_report_safe_status_and_timeout(self):
+        secret = 'fake-key-private123'
+        errors = [
+            (urllib.error.HTTPError('https://example.test/' + secret, 400,
+                                   secret, {'Secret': secret}, None), 'DeepSeek 请求失败（HTTP 400）'),
+            (TimeoutError(secret), 'DeepSeek 请求超时'),
+            (urllib.error.URLError(TimeoutError(secret)), 'DeepSeek 请求超时'),
+            (urllib.error.URLError(secret), 'DeepSeek 请求失败，请检查网络或配置'),
+        ]
+        for error, expected in errors:
+            class Opener:
+                def open(self, *args, **kwargs): raise error
+            with self.subTest(error=type(error).__name__), self.assertRaises(ModelError) as caught:
+                DeepSeek(secret, Opener()).complete([], [], threading.Event())
+            self.assertEqual(str(caught.exception), expected)
+            self.assertNotIn(secret, str(caught.exception))
 
     def test_platform_denial_keeps_code_and_exact_missing_permission(self):
         from polaris_platform.protocol import PlatformError

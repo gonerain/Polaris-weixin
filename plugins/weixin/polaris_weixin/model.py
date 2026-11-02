@@ -1,9 +1,11 @@
 """Small, bounded DeepSeek transport, independent of the UI."""
 import json
 import os
+import socket
 import threading
 import time
 import urllib.request
+import urllib.error
 from .instructions import REVIEW_SYSTEM
 
 
@@ -39,10 +41,9 @@ class DeepSeek:
             'parameters': {'type': 'object', 'properties': {
                 'needs_tools': {'type': 'boolean'}, 'reply': {'type': 'string'}, 'reason': {'type': 'string'}},
                 'required': ['needs_tools', 'reply', 'reason'], 'additionalProperties': False}}}
-        messages = [{'role': 'system', 'content': REVIEW_SYSTEM},
+        messages = [{'role': 'system', 'content': REVIEW_SYSTEM + '\n必须调用 review_reply 工具返回核查结果，不要直接输出正文。'},
             {'role': 'user', 'content': json.dumps({'request': request, 'draft': draft, 'evidence': evidence}, ensure_ascii=False)}]
-        response = self.complete(messages, [schema], cancel, timeout,
-                                 tool_choice={'type': 'function', 'function': {'name': 'review_reply'}})
+        response = self.complete(messages, [schema], cancel, timeout)
         try:
             calls = response['tool_calls']
             if len(calls) != 1 or calls[0]['function']['name'] != 'review_reply':
@@ -125,7 +126,17 @@ class DeepSeek:
             return result
         except ModelError:
             raise
+        except urllib.error.HTTPError as exc:
+            raise ModelError(f'DeepSeek 请求失败（HTTP {exc.code}）') from None
+        except (TimeoutError, socket.timeout):
+            raise ModelError('DeepSeek 请求超时') from None
+        except urllib.error.URLError as exc:
+            if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+                raise ModelError('DeepSeek 请求超时') from None
+            raise ModelError('DeepSeek 请求失败，请检查网络或配置') from None
         except Exception:
+            if cancel.is_set() or time.monotonic() >= deadline:
+                raise ModelError('请求已取消或超时') from None
             # Network exceptions can contain headers or response bodies; never expose them.
             raise ModelError('DeepSeek 请求失败，请检查网络或配置') from None
         finally:
