@@ -277,9 +277,50 @@ class CoreTests(unittest.TestCase):
         opener = Opener()
         result = DeepSeek(key, opener).complete([], [], threading.Event())
         self.assertNotIn(key, str(result))
-        self.assertNotIn('reasoning_content', result)
+        self.assertEqual(result['reasoning_content'], 'hidden')
+        self.assertEqual(opener.payload['thinking'], {'type': 'enabled'})
+        self.assertEqual(opener.payload['reasoning_effort'], 'max')
+        self.assertNotIn('max_tokens', opener.payload)
         self.assertEqual(opener.payload['model'], 'deepseek-flash')
         self.assertFalse(opener.payload['stream'])
+
+    def test_thinking_tool_context_is_returned_without_leaking_to_history(self):
+        key = 'sk-thinking-secret123'
+        thought = '私有思考 ' + key + '想' * 300000
+        replies = iter([
+            {'content': None, 'reasoning_content': thought,
+             'tool_calls': [tool('components', {})]},
+            {'content': '完成', 'reasoning_content': '最终私有思考'},
+        ])
+
+        class Response:
+            def __init__(self, message):
+                self.data = json.dumps({'choices': [{'message': message}]}, ensure_ascii=False).encode()
+            def read(self, size):
+                chunk, self.data = self.data[:size], self.data[size:]
+                return chunk
+            def close(self): pass
+
+        class Opener:
+            def __init__(self): self.payloads = []; self.timeouts = []
+            def open(self, request, timeout):
+                self.payloads.append(json.loads(request.data))
+                self.timeouts.append(timeout)
+                return Response(next(replies))
+
+        opener = Opener()
+        model = DeepSeek(key, opener)
+        # Exercise generation's tool loop without making an extra review request.
+        model.review = None
+        result = WeixinAgent(model).run('查询', [], Executor(), threading.Event())
+        context = opener.payloads[1]['messages']
+        assistant = next(row for row in context if row['role'] == 'assistant')
+        self.assertEqual(assistant['reasoning_content'], thought.replace(key, '[已隐藏密钥]'))
+        self.assertNotIn(key, json.dumps(context))
+        self.assertEqual(result.text, '完成')
+        self.assertNotIn('reasoning_content', json.dumps(result.history))
+        self.assertNotIn('私有思考', json.dumps(result.history, ensure_ascii=False))
+        self.assertTrue(all(179 < timeout <= 180 for timeout in opener.timeouts))
 
     def test_empty_or_invalid_answer_is_error(self):
         for content in (None, '', '   ', {}, 1):
@@ -340,7 +381,7 @@ class CoreTests(unittest.TestCase):
                 DeepSeek(key)
 
     def test_transport_rejects_invalid_types_and_late_cancel(self):
-        for message in ({'content': {}}, {'content': 'ok', 'tool_calls': {}},
+        for message in ({'content': {}}, {'content': 'ok', 'reasoning_content': {}}, {'content': 'ok', 'tool_calls': {}},
                         {'content': 'ok', 'tool_calls': ['bad']}):
             class Response:
                 def __init__(self): self.done = False

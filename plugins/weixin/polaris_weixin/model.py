@@ -7,6 +7,10 @@ import urllib.request
 from .instructions import REVIEW_SYSTEM
 
 
+MODEL_TIMEOUT = 180
+MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+
+
 class ModelError(RuntimeError):
     pass
 
@@ -29,7 +33,7 @@ class DeepSeek:
     def redact(self, value):
         return str(value).replace(self._key, '[已隐藏密钥]')
 
-    def review(self, request, draft, evidence, cancel, timeout=30):
+    def review(self, request, draft, evidence, cancel, timeout=MODEL_TIMEOUT):
         schema = {'type': 'function', 'function': {'name': 'review_reply',
             'description': '核对回复是否有本轮实际工具结果支持。',
             'parameters': {'type': 'object', 'properties': {
@@ -51,11 +55,11 @@ class DeepSeek:
         except (KeyError, TypeError, ValueError):
             raise ModelError('回复结果核对失败') from None
 
-    def complete(self, messages, tools, cancel, timeout=30, tool_choice=None):
+    def complete(self, messages, tools, cancel, timeout=MODEL_TIMEOUT, tool_choice=None):
         if cancel.is_set():
             raise ModelError('请求已取消')
         payload = {'model': 'deepseek-flash', 'messages': messages,
-                   'thinking': {'type': 'disabled'}, 'stream': False, 'max_tokens': 1024}
+                   'thinking': {'type': 'enabled'}, 'reasoning_effort': 'max', 'stream': False}
         if tools:
             payload['tools'] = tools
         if tool_choice is not None:
@@ -84,7 +88,7 @@ class DeepSeek:
                 if not block:
                     break
                 data.extend(block)
-                if len(data) > 262144:
+                if len(data) > MAX_RESPONSE_BYTES:
                     raise ModelError('模型响应过大')
             if cancel.is_set() or time.monotonic() >= deadline:
                 raise ModelError('请求已取消或超时')
@@ -94,12 +98,18 @@ class DeepSeek:
             content = message.get('content')
             if content is not None and not isinstance(content, str):
                 raise ModelError('模型正文格式无效')
+            reasoning = message.get('reasoning_content')
+            if reasoning is not None and not isinstance(reasoning, str):
+                raise ModelError('模型思考格式无效')
             calls = message.get('tool_calls', [])
             if calls is None:
                 calls = []
             if not isinstance(calls, list):
                 raise ModelError('模型工具响应格式无效')
             result = {'role': 'assistant', 'content': self.redact(content) if content is not None else None}
+            # Thinking is transient tool-loop context, never user-visible history.
+            if reasoning is not None:
+                result['reasoning_content'] = self.redact(reasoning)
             if calls:
                 normalized = []
                 for call in calls:

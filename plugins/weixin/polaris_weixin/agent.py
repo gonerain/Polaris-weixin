@@ -2,9 +2,12 @@
 from dataclasses import dataclass
 import json
 import time
-from .model import ModelError
+from .model import MODEL_TIMEOUT, ModelError
 from .instructions import SYSTEM
 from polaris_platform.protocol import PlatformError
+
+
+RUN_TIMEOUT = 900
 
 
 def _tool(name, description, properties, required=()):
@@ -58,16 +61,16 @@ class WeixinAgent:
         for turn in range(9):
             if cancel.is_set():
                 raise ModelError('请求已取消')
-            remaining = 90 - (time.monotonic() - started)
+            remaining = RUN_TIMEOUT - (time.monotonic() - started)
             if remaining <= 0:
                 raise ModelError('请求超时')
             final = tool_rounds >= 6 or calls >= 12 or turn == 8
             if final:
                 messages.append({'role': 'system', 'content': '工具调用已结束。根据已有结果直接回复，明确哪些操作成功、失败或结果未知，不再调用工具。'})
-            response = self.model.complete(messages, [] if final else TOOLS, cancel, timeout=min(30, remaining))
+            response = self.model.complete(messages, [] if final else TOOLS, cancel, timeout=min(MODEL_TIMEOUT, remaining))
             if cancel.is_set():
                 raise ModelError('请求已取消')
-            if time.monotonic() - started >= 90:
+            if time.monotonic() - started >= RUN_TIMEOUT:
                 raise ModelError('请求超时')
             if not isinstance(response, dict):
                 raise ModelError('模型响应格式无效')
@@ -82,14 +85,14 @@ class WeixinAgent:
                     raise ModelError('模型未返回有效正文')
                 reviewer = getattr(self.model, 'review', None)
                 if reviewer:
-                    remaining = 90 - (time.monotonic() - started)
+                    remaining = RUN_TIMEOUT - (time.monotonic() - started)
                     if remaining <= 0:
                         raise ModelError('请求超时')
                     # Keep the original conversational references even after many
                     # tool rounds; evidence is supplied separately.
                     can_use_tools = not final and corrections < 2
                     request = {**review_request, 'can_use_tools': can_use_tools}
-                    review = reviewer(json.dumps(request, ensure_ascii=False), answer, evidence, cancel, timeout=min(30, remaining))
+                    review = reviewer(json.dumps(request, ensure_ascii=False), answer, evidence, cancel, timeout=min(MODEL_TIMEOUT, remaining))
                     if review['needs_tools']:
                         if not can_use_tools:
                             raise ModelError('本轮未能确认操作结果，请查询实际状态')
@@ -112,7 +115,7 @@ class WeixinAgent:
             for call in tool_calls:
                 if cancel.is_set():
                     raise ModelError('请求已取消')
-                if time.monotonic() - started >= 90:
+                if time.monotonic() - started >= RUN_TIMEOUT:
                     raise ModelError('请求超时')
                 calls += 1
                 name, args = None, {}
@@ -160,7 +163,7 @@ class WeixinAgent:
                                  'content': content})
         if cancel.is_set():
             raise ModelError('请求已取消')
-        if time.monotonic() - started >= 90:
+        if time.monotonic() - started >= RUN_TIMEOUT:
             raise ModelError('请求超时')
         if answer is None:
             raise ModelError('本次处理已达到请求次数限制')
