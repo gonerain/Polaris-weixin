@@ -1,0 +1,59 @@
+{
+  "roles": {
+    "authorization": "authorization",
+    "collaboration": "collaboration",
+    "runtime": "runtime"
+  },
+  "required": [
+    "authorization",
+    "collaboration",
+    "runtime"
+  ],
+  "start": [
+    "authorization",
+    "collaboration",
+    "runtime"
+  ],
+  "components": [
+    {
+      "manifest": {
+        "id": "authorization",
+        "name": "Authorization",
+        "version": "0.1.0",
+        "platformApi": 1,
+        "entry": {
+          "mode": "inprocess",
+          "factory": "polaris_platform.builtins:create_authorization"
+        }
+      }
+    },
+    {
+      "manifest": {
+        "id": "collaboration",
+        "name": "Collaboration",
+        "version": "0.1.0",
+        "platformApi": 1,
+        "entry": {
+          "mode": "inprocess",
+          "factory": "polaris_platform.builtins:create_collaboration"
+        }
+      }
+    },
+    {
+      "manifest": {
+        "id": "runtime",
+        "name": "Runtime",
+        "version": "0.1.0",
+        "platformApi": 1,
+        "entry": {
+          "mode": "inprocess",
+          "factory": "polaris_platform.builtins:create_runtime"
+        }
+      }
+    },
+    {
+      "directory": "plugins/weixin",
+      "autostart": true
+    }
+  ]
+}

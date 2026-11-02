@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "name": "Polaris 微信",
+  "components": [
+    {
+      "path": "plugins/weixin"
+    }
+  ]
+}

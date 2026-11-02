@@ -1,0 +1,1 @@
+{"id":"org.polaris.weixin","name":"微信","version":"0.1.0","platformApi":1,"entry":{"mode":"inprocess","factory":"polaris_weixin:create"}}

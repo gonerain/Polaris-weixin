@@ -1,0 +1,3 @@
+# Native view and locally rendered login QR code.
+PySide6-Essentials>=6.5
+qrcode>=7.4
