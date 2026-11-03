@@ -67,7 +67,7 @@ class CompletionAdapter:
             if isinstance(reply,str) and reply.strip():
                 text += '\n\n' + reply.strip()
             if len(text) > 1950 or result.get('replyTruncated'):
-                text = text[:1900] + '\n（结果较长，完整内容请在 Agent 中查看）'
+                text = text[:1900] + '\n（结果较长，完整内容请在任务组件中查看）'
             record.update(state='sending',runId=result['runId'])
             self.save()
             # Persist the claim first: even a crash after network submission cannot resend.

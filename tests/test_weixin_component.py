@@ -88,9 +88,23 @@ class WeixinComponentTests(unittest.TestCase):
         self.assertEqual(self.fake.calls, [])
         description = self.runtime.status(self.identity)['description']
         self.assertEqual(description['dependencies'], [])
+        self.assertNotIn('generate_reply', description['operations'])
+        self.assertTrue(description['operations']['send'].get('available', True))
+        self.assertFalse(self.call('agent_settings')['ready'])
         self.assertEqual(description['views'][0]['adapter'], 'qt-quick-item')
         self.assertEqual(description['operations']['create_view']['profile'], 'qt-native')
         self.assertEqual(self.call('release_view', handle='missing'), {'released': False})
+
+    def test_existing_v2_settings_preserve_saved_choices(self):
+        from polaris_weixin.controller import AgentController
+        path = Path(self.directory.name) / 'v2-settings.json'
+        allowed = [{'target': 'toy', 'operation': 'read'}]
+        path.write_text(json.dumps({'version': 2, 'enabled': True, 'allowed': allowed}))
+        controller = AgentController(self.component.client, path, lambda: None)
+        self.assertFalse(controller.bad_file)
+        self.assertEqual(controller.allowed, allowed)
+        self.assertTrue(controller.desired_enabled)
+        self.assertFalse(controller.enabled)
 
     def test_saved_binding_connects_on_start_without_opening_view(self):
         from types import SimpleNamespace

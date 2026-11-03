@@ -12,10 +12,19 @@ if __name__ != '__main__':
             import importlib.util
             if importlib.util.find_spec('PySide6') is None:
                 self.skipTest('Optional PySide6 is not installed')
-            result = subprocess.run([sys.executable, str(Path(__file__).resolve())],
-                env=dict(os.environ, QT_QPA_PLATFORM='offscreen', QT_QUICK_BACKEND='software'),
-                capture_output=True, text=True, timeout=40)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            # Each case starts and tears down an entire Qt desktop. Give it the
+            # same QML-engine lifetime as the application rather than sharing
+            # native process-global caches across five independent hosts.
+            command = [sys.executable, str(Path(__file__).resolve())]
+            env = dict(os.environ, QT_QPA_PLATFORM='offscreen', QT_QUICK_BACKEND='software')
+            listing = subprocess.run(command + ['--list-cases'], env=env, capture_output=True, text=True,
+                                     timeout=15, check=True)
+            cases = listing.stdout.splitlines()
+            self.assertTrue(cases)
+            for case in cases:
+                with self.subTest(case=case):
+                    result = subprocess.run(command + [case], env=env, capture_output=True, text=True, timeout=40)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 else:
     import json
     import tempfile
@@ -332,4 +341,8 @@ else:
             self.assertFalse(bridges[0].invoke('send', '{"text":"Denied"}'))
             self.assertEqual(len(self.fake.sent), 1)
 
-    unittest.main()
+    if '--list-cases' in sys.argv:
+        for test in unittest.defaultTestLoader.getTestCaseNames(WeixinCanvasIntegration):
+            print('WeixinCanvasIntegration.' + test)
+    else:
+        unittest.main()

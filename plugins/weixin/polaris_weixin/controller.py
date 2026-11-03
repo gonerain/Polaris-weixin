@@ -33,7 +33,7 @@ class AgentController:
                 if self.path.stat().st_size > 100000:
                     raise ValueError()
                 data = json.loads(self.path.read_text('utf8'))
-                if not isinstance(data, dict) or data.get('version') != 1:
+                if not isinstance(data, dict) or data.get('version') not in (1, 2):
                     raise ValueError()
                 self.provider = data.get('provider')
                 self.allowed = self.validate(data['allowed'])

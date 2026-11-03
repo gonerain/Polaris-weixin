@@ -183,8 +183,10 @@ class Bridge(QObject):
                 chosen = {(row['target'], row['operation']) for row in selected}
                 previous = {(row['target'], row['operation']) for row in controller.allowed}
                 permissions = {(self._component.port.id, 'configure_agent')}
-                if params.get('enabled') is True or 'allowed' in params:
-                    permissions |= chosen | set(controller.task_operations(selected))
+                if params.get('enabled') is True:
+                    permissions |= set(controller.task_operations(selected))
+                elif 'allowed' in params:
+                    permissions |= chosen
                 self._local_input.call(operation, params, permissions=permissions, revoked=previous - chosen)
             else:
                 self._context.call(self._component.port.id, operation, params)
