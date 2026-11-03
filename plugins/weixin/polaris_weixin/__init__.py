@@ -8,6 +8,8 @@ from .credentials import CredentialStore
 from .storage import ChatStore
 from .controller import AgentController
 from .completion import CompletionAdapter
+from .attachments import AttachmentStore
+from .interactions import HumanReplies
 
 WRITES = ('login', 'verify', 'connect', 'disconnect', 'logout', 'send', 'clear_messages')
 
@@ -19,31 +21,39 @@ def default_data_dir():
 
 
 class Weixin(Component):
-    def __init__(self, data_dir=None, transport=None, credentials=None, directory_id="collaboration", component_id="weixin", agent=None):
+    def __init__(self, data_dir=None, transport=None, credentials=None, directory_id="collaboration", component_id="weixin"):
         super().__init__()
         directory = Path(data_dir) if data_dir is not None else default_data_dir()
         self._presentation = None
         self.client = Client(credentials or CredentialStore(directory / 'credentials.bin'),
                              ChatStore(directory / 'chats'), transport, self._changed)
-        self.agent = AgentController(self.client, directory / "agent.json", self._changed, directory_id, component_id, agent)
+        self.attachments = AttachmentStore()
+        self.client.attachments = self.attachments
+        self.agent = AgentController(self.client, directory / "agent.json", self._changed, directory_id, component_id)
         self.completions = CompletionAdapter(self.client, directory / 'agent-completions.json', component_id)
         self.agent.completions = self.completions
-        self.client.on_text = self.agent.receive
+        self.interactions = HumanReplies(self.client, directory / 'agent-interactions.json', self.completions)
+        self.client.on_text = self._receive_text
         self.client.on_invalidate = self.agent.invalidate
         self.client.on_account_changed = self.agent.reset_conversation
         self._lock = self.client._lock
         self.views = [{'id': 'main', 'adapter': 'qt-quick-item', 'title': '微信',
                        'create': 'create_view', 'release': 'release_view',
                        'permissions': [{'name': name, 'access': 'read'} for name in ('get', 'agent_settings', 'agent_catalog')] +
-                                      [{'name': name, 'access': 'write'} for name in ('configure_agent', 'new_conversation', 'complete_agent_run')] +
+                                      [{'name': name, 'access': 'write'} for name in ('configure_agent', 'new_conversation', 'complete_agent_run', 'receive_agent_request', 'agent_control')] +
                                       [{'target': directory_id, 'name': name, 'access': 'read'} for name in ('discover', 'describe')] +
                                       [{'name': name, 'access': 'write'} for name in WRITES]}]
         self.operation('get')(self.get)
+        self.operation('save_attachment', access='write')(self.save_attachment)
+        self.operation('write_file', access='write')(self.write_file)
+        self.operation('read_file')(self.read_file)
         self.operation('agent_settings')(self.agent_settings)
         self.operation('agent_catalog')(self.agent_catalog)
         self.operation('configure_agent', access='write')(self.configure_agent)
         self.operation('new_conversation', access='write')(self.new_conversation)
         self.operation('complete_agent_run', access='write')(self.complete_agent_run)
+        self.operation('receive_agent_request', access='write')(self.receive_agent_request)
+        self.operation('agent_control', access='write')(self.agent_control)
         for name in WRITES:
             self.operation(name, access='write')(self.logout if name == 'logout' else getattr(self.client, name))
         self.operation('create_view', access='write')(self.create_view)
@@ -68,19 +78,44 @@ class Weixin(Component):
         if self._presentation is not None:
             self._presentation.changed.emit()
 
-    def get(self):
+    def _receive_text(self, text, timestamp):
+        self.agent.resume()
+        if not self.interactions.handle(text, timestamp, self.agent.ctx):
+            self.agent.receive(text, timestamp)
+
+    def receive_agent_request(self, notification_id, result, ctx):
+        source = getattr(getattr(ctx, 'context', None), 'caller', None)
+        return self.interactions.receive(notification_id, result, source)
+
+    def get(self, ctx=None):
+        if ctx is not None:
+            self.agent.resume()
+            self.agent.refresh(self.agent.ctx or ctx)
         result = self.client.get()
         result['agent'] = self.agent_settings()
         return result
 
-    def agent_settings(self):
-        return self.agent.settings()
+    def save_attachment(self, attachment_id):
+        account = (self.client.account.get('botId'), self.client.account.get('userId'))
+        return self.attachments.save(attachment_id, account, self.client.cancel)
+
+    def write_file(self, name, content, encoding='utf-8'):
+        return self.attachments.write(name, content, encoding)
+
+    def read_file(self, file_id, encoding='utf-8', offset=0, limit=65536):
+        return self.attachments.read(file_id, encoding, offset, limit)
+
+    def agent_settings(self, ctx=None):
+        return self.agent.refresh(self.agent.ctx or ctx) if ctx is not None else self.agent.settings()
 
     def agent_catalog(self, ctx):
         return self.agent.catalog(ctx)
 
     def configure_agent(self, enabled, ctx, allowed=None):
         return self.agent.configure(enabled, allowed, ctx)
+
+    def agent_control(self, turn, action, ctx, target=None, metadata=None, arguments=None):
+        return self.agent.control(turn, action, ctx, target, metadata, arguments)
 
     def new_conversation(self):
         return self.agent.new_conversation()
@@ -91,6 +126,17 @@ class Weixin(Component):
 
     def describe(self):
         result = super().describe()
+        result['operations']['agent_control'].update(modelCallable=False, description='本轮委托回调，校验来源与轮次。')
+        for name, title, description in (
+            ('save_attachment', '保存微信附件', '将本账号收到的图片或文件保存到组件临时目录，返回 file_id、path、name、size、mime。'),
+            ('write_file', '写入临时文件', '仅在本组件临时目录创建文件；name 为文件名，content 为正文，encoding 为 utf-8 或 base64。返回本地绝对路径。'),
+            ('read_file', '读取临时文件', '按 file_id 读取本组件创建的文件；可指定 encoding、offset、limit（最多 1 MiB）。临时目录清理后文件失效。')):
+            result['operations'][name].update(title=title, description=description)
+        for name, properties, required in (
+            ('save_attachment', {'attachment_id':{'type':'string'}}, ['attachment_id']),
+            ('write_file', {'name':{'type':'string'},'content':{'type':'string'},'encoding':{'type':'string','enum':['utf-8','base64']}}, ['name','content']),
+            ('read_file', {'file_id':{'type':'string'},'encoding':{'type':'string','enum':['utf-8','base64']},'offset':{'type':'integer','minimum':0},'limit':{'type':'integer','minimum':1,'maximum':1048576}}, ['file_id'])):
+            result['operations'][name]['parameters']={'type':'object','properties':properties,'required':required,'additionalProperties':False}
         result['operations']['complete_agent_run'].update(title='接收任务结果',
             description='将本组件发起任务的确定结束结果直接通知绑定者，不调用模型；按任务去重。')
         for name in ('create_view', 'release_view'):
@@ -123,5 +169,5 @@ class Weixin(Component):
         super().stop()
 
 
-def create(data_dir=None, transport=None, credentials=None, directory_id="collaboration", component_id="weixin", agent=None):
-    return Weixin(data_dir, transport, credentials, directory_id, component_id, agent)
+def create(data_dir=None, transport=None, credentials=None, directory_id="collaboration", component_id="weixin"):
+    return Weixin(data_dir, transport, credentials, directory_id, component_id)

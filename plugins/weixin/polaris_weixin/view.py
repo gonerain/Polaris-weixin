@@ -125,7 +125,7 @@ class Bridge(QObject):
             data = self._context.call(self._component.port.id, 'get', {})
             data = dict(data)
             settings = data.pop('agent', {})
-            safe = {key: settings.get(key) for key in ('enabled', 'desiredEnabled', 'resumePending', 'busy', 'error', 'hasKey', 'model', 'allowed', 'queued')}
+            safe = {key: settings.get(key) for key in ('enabled', 'desiredEnabled', 'resumePending', 'busy', 'error', 'hasKey', 'ready', 'model', 'detail', 'allowed', 'queued')}
             agent = json.dumps(safe, ensure_ascii=False)
             if agent != self._agent:
                 self._agent = agent

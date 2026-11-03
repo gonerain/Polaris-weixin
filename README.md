@@ -17,3 +17,6 @@ PYTHONPATH=plugins/weixin python -m unittest discover -s tests
 二维码编码器 qrcode 8.2 随组件携带，安装源不需要修改宿主依赖。可选跨仓测试：设置 `POLARIS_AGENT_REPO` 为 Agent checkout 后运行 `python -m unittest discover -s integration_tests`。
 
 本地平台开发可用 `python -m pip install -e /path/to/Polaris/next` 代替 Git 安装。
+
+自动回复通过公开的 `polaris.agent.reply@1` 对话服务委托处理。组件保存自动回复开关、允许操作、会话投递和账号绑定，不读取模型 API Key。
+首次使用时选择允许操作并开启自动回复；模型就绪状态由对话服务提供。

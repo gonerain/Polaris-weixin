@@ -32,6 +32,8 @@ class CompletionAdapter:
                 sessionId=params['session_id'], deliveryId=params['delivery_id'], state='waiting')
             self.save()
             params['on_complete'] = dict(target=self.identity,operation='complete_agent_run',params={'notification_id':token})
+            if metadata.get('interactionCallback') == {'version':1,'parameter':'on_interaction','responseOperation':'respond'}:
+                params['on_interaction'] = dict(target=self.identity,operation='receive_agent_request',params={'notification_id':token})
             return params
 
     def receive(self, notification_id, result, source):

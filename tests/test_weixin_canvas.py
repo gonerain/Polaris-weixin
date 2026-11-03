@@ -27,6 +27,9 @@ else:
     from PySide6.QtTest import QTest
     from polaris_platform.bootstrap import build
     from polaris_platform.component import Component
+    from components import manifest as component_manifest
+    from components.assistant import Assistant
+    from components.assistant.loop import AgentLoop, AgentResult
     from polaris_platform.desktop import WindowHost, Canvas, Manager
 
     def find(item, name):
@@ -52,6 +55,11 @@ else:
             config['components'][-1].update(manifest=manifest)
             self.runtime = build(config, ROOT)
             self.component = self.runtime.component_instance('org.polaris.weixin')
+            class Echo:
+                def run(self, text, history, tools, cancel): return AgentResult(text, [])
+            self.assistant = Assistant(Echo(), data_dir=Path(self.directory.name)/'assistant')
+            self.runtime.install(component_manifest('assistant'), lambda:self.assistant)
+            self.runtime.start_component('assistant')
             self.fake = FakeTransport()
             self.component.client.transport = self.fake
             self.component.client.credentials = Credentials(ACCOUNT)
@@ -157,7 +165,7 @@ else:
             sys.path.insert(0, str(ROOT / 'integration_tests'))
             from test_weixin_agent_e2e import ScriptedModel, tool, call, TARGET, OPERATIONS
             from polaris_agent import Agent
-            from polaris_weixin.agent import WeixinAgent
+            from components.assistant.loop import AgentLoop
             agent = Agent(data_dir=Path(self.directory.name) / 'agent')
             self.runtime.install(dict(id=TARGET, name='Agent', version='1', platformApi=1,
                 entry=dict(mode='inprocess')), lambda: agent)
@@ -165,7 +173,7 @@ else:
             for name in agent.describe()['operations']:
                 self.runtime.grant('canvas', TARGET, name)
             row = agent.store.snapshot('fixture', 'ui', 'ui-session', title='画布联调会话')
-            self.component.agent.agent = WeixinAgent(ScriptedModel([
+            self.assistant.engine = AgentLoop(ScriptedModel([
                 tool('help', component='Agent'), call('mark', session_id=row['id']), {'content': '画布会话已标记'},
                 tool('help', component='Agent'), call('unmark', session_id=row['id']), {'content': '画布会话已取消标记'}]))
             self.mount_by_picker()
@@ -201,8 +209,6 @@ else:
             self.runtime.install(dict(id='toy',name='Toy',version='1',platformApi=1,
                                       entry=dict(mode='inprocess')), lambda: toy)
             self.runtime.start_component('toy')
-            self.component.agent.agent = object()
-            self.component.agent.has_key = True
             self.mount_by_picker()
             bridge = next(iter(self.component._presentation._views.values()))[2]
             bridge.refresh(); QTest.qWait(30)

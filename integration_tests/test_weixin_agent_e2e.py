@@ -1,5 +1,7 @@
 """Real Weixin + Agent + authority + socket bridge, isolated external services."""
 import json
+import itertools
+import copy
 import os
 from pathlib import Path
 import socket
@@ -16,15 +18,19 @@ sys.path.insert(0, str(Path(os.environ['POLARIS_AGENT_REPO']) / 'plugins/agent')
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'plugins/weixin'))
 import test_weixin_component as fixtures
 from polaris_agent import Agent
-from polaris_weixin.agent import WeixinAgent
-from polaris_weixin.model import ModelError
+from components import manifest
+from components.assistant import Assistant
+from components.assistant.loop import AgentLoop
+from components.assistant.model import ModelError
 
 TARGET = 'org.polaris.agent'
-OPERATIONS = ('get', 'sessions', 'status', 'result', 'delivery', 'mark', 'unmark', 'send')
+OPERATIONS = ('get', 'sessions', 'status', 'result', 'delivery', 'mark', 'unmark', 'send', 'respond', 'requests')
 
+
+_call_ids = itertools.count()
 
 def tool(name, **args):
-    return {'role': 'assistant', 'tool_calls': [{'id': name, 'type': 'function',
+    return {'role': 'assistant', 'tool_calls': [{'id': name+str(next(_call_ids)), 'type': 'function',
             'function': {'name': name, 'arguments': json.dumps(args)}}]}
 
 
@@ -59,6 +65,7 @@ class Host:
         self.lock = threading.Lock()
         self.commands = []
         self.error = None
+        self.complete_immediately = True
         self.send(type='hello', token=info['token'], adapter='fixture', clientId='host')
         assert json.loads(self.stream.readline())['ok']
         self.send(type='event', event='session.snapshot', sessionId='fixture-a62bc0',
@@ -82,8 +89,9 @@ class Host:
                 self.commands.append(frame)
                 self.send(type='event', event='command.result', requestId=frame['requestId'], status='accepted', runId='fixture-run')
                 self.send(type='event', event='run.started', sessionId=frame['sessionId'], runId='fixture-run')
-                self.send(type='event', event='run.ended', sessionId=frame['sessionId'], runId='fixture-run',
-                          status='completed', reply='测试宿主已完成：' + frame['text'])
+                if self.complete_immediately:
+                    self.send(type='event', event='run.ended', sessionId=frame['sessionId'], runId='fixture-run',
+                              status='completed', reply='测试宿主已完成：' + frame['text'])
         except OSError:
             pass
         except Exception as error:
@@ -104,13 +112,16 @@ class WeixinAgentEndToEndTests(unittest.TestCase):
 
     def setUp(self):
         fixtures.WeixinComponentTests.setUp(self)
+        self.assistant = Assistant(AgentLoop(ScriptedModel([])), data_dir=Path(self.directory.name)/'assistant')
+        self.runtime.install(manifest('assistant'), lambda:self.assistant)
+        self.runtime.start_component('assistant')
         self.agent_component = Agent(data_dir=Path(self.directory.name) / 'agent')
         self.runtime.install(dict(id=TARGET, name='Agent', version='1', platformApi=1,
                                   entry=dict(mode='inprocess')), lambda: self.agent_component)
         self.runtime.start_component(TARGET)
         self.host = Host(self.agent_component.bridge.endpoint)
         self.session = self.host.row['id']
-        for target, names in [(TARGET, OPERATIONS), ('collaboration', ('discover', 'describe'))]:
+        for target, names in [(TARGET, OPERATIONS), ('assistant', ('reply','status')), ('collaboration', ('discover', 'describe'))]:
             for name in names:
                 self.runtime.grant('user', target, name)
         self.context = self.runtime.user_context('user')
@@ -136,7 +147,7 @@ class WeixinAgentEndToEndTests(unittest.TestCase):
 
     def enable(self, model):
         self.model = model
-        self.component.agent.agent = WeixinAgent(model)
+        self.assistant.engine = AgentLoop(model)
         self.call('configure_agent', enabled=True,
                   allowed=[{'target': TARGET, 'operation': name} for name in OPERATIONS])
 
@@ -157,6 +168,37 @@ class WeixinAgentEndToEndTests(unittest.TestCase):
         self.assertFalse(self.component.agent.error)
         self.assertIsNone(self.host.error)
         return replies()[-1]['item_list'][0]['text_item']['text']
+
+    def test_real_request_callback_human_approval_and_question_bypass_model(self):
+        self.host.complete_immediately=False
+        self.agent_component.mark(self.session)
+        model=ScriptedModel([tool('help',component=TARGET),
+            call('send',session_id=self.session,text='inspect file',mode='start'),
+            {'content':'任务已提交'}])
+        self.enable(model)
+        self.incoming('让 Agent 检查文件')
+        self.reply()
+        self.wait(lambda: any(d.get('status')=='accepted' for d in self.agent_component.store.deliveries.values()))
+        request=self.agent_component.bridge.interactions.open(self.session,('fixture','host'),'fixture-run',
+            'approval','允许执行 pwd 吗？',[],60)
+        self.wait(lambda: request['id'] in self.component.interactions.records)
+        self.wait(lambda: not self.component.client.sending)
+        before=len(model.observed)
+        self.incoming('批准 '+request['id'][:10])
+        self.wait(lambda:self.agent_component.store.requests[request['id']]['state']=='answered')
+        status=self.agent_component.bridge.interactions.native_status(request['id'],('fixture','host'),self.session)
+        self.assertEqual(status['answer'],'allow')
+        self.assertEqual(len(model.observed),before,'Human decisions must bypass the model')
+        self.wait(lambda: not self.component.client.sending)
+        question=self.agent_component.bridge.interactions.open(self.session,('fixture','host'),'fixture-run',
+            'question','选择格式',['PDF','Word'],60)
+        self.wait(lambda: question['id'] in self.component.interactions.records)
+        self.wait(lambda: not self.component.client.sending)
+        self.incoming('回答 '+question['id'][:10]+' 2')
+        self.wait(lambda:self.agent_component.store.requests[question['id']]['state']=='answered')
+        self.assertEqual(self.agent_component.store.requests[question['id']]['answer'],'Word')
+        self.assertEqual(len(model.observed),before)
+        self.assertNotIn('responseToken',str(self.agent_component.requests()))
 
     def test_query_mark_status_unmark_through_real_components(self):
         def choose(messages):
@@ -179,7 +221,8 @@ class WeixinAgentEndToEndTests(unittest.TestCase):
         self.incoming('取消刚才的标记')
         self.assertEqual(self.reply(2), '已取消标记')
         self.assertFalse(self.agent_component.status(self.session)['marked'])
-        self.assertEqual(len(self.component.agent.history), 4)
+        self.assertTrue(self.component.agent.parent)
+        self.assertEqual(len(next(iter(self.assistant._conversations.values()))[self.component.agent.parent]),4)
 
     def test_mark_on_last_round_and_model_timeout_after_write(self):
         for index, final in enumerate(({'content': '标记完成'}, self.model_timeout)):
@@ -211,8 +254,9 @@ class WeixinAgentEndToEndTests(unittest.TestCase):
             self.assertIn('测试任务', result['reply'])
             return {'content': '测试任务已完成'}
         send = call('send', session_id=self.session, text='测试任务', mode='start', delivery_id='fixture-delivery')
+        duplicate = copy.deepcopy(send['tool_calls']); duplicate[0]['id'] += '-again'
         combined = {'role': 'assistant', 'tool_calls': call('mark', session_id=self.session)['tool_calls'] +
-                    send['tool_calls'] + send['tool_calls']}
+                    send['tool_calls'] + duplicate}
         self.enable(ScriptedModel([tool('help', component='Agent'), combined, await_result,
                                    verify_delivery, verify_result]))
         self.incoming('标记并发送测试任务，查看结果')
@@ -247,17 +291,21 @@ class WeixinAgentEndToEndTests(unittest.TestCase):
         self.assertEqual(self.host.commands, [])
         self.assertEqual(self.agent_component.store.deliveries, {})
 
-    def test_long_result_remains_parseable_and_identifies_truncation(self):
-        self.agent_component.store.run_event(self.session, 'long', 'completed', '长回复"\\\n' * 5000)
+    def test_long_result_is_read_by_reference_without_reexecuting(self):
+        self.agent_component.store.run_event(self.session, 'long', 'completed', '长回复' * 10000)
         def inspect_result(messages):
-            content = messages[-1]['content']
-            self.assertLessEqual(len(content), 12000)
-            result = json.loads(content)
-            self.assertTrue(result['truncated'])
-            return {'content': '结果较长，已截取'}
-        self.enable(ScriptedModel([tool('help', component='Agent'), call('result', session_id=self.session), inspect_result]))
+            result = json.loads(messages[-1]['content'])
+            self.assertLess(len(messages[-1]['content']), 3000)
+            self.assertGreater(result['total_chars'], 12000)
+            return tool('read_result', result_ref=result['result_ref'], path='/reply', offset=0, limit=3000)
+        def read_chunk(messages):
+            result = json.loads(messages[-1]['content'])
+            self.assertTrue(result['more'])
+            self.assertIn('长回复', result['text'])
+            return {'content':'长结果已按需读取'}
+        self.enable(ScriptedModel([tool('help', component='Agent'), call('result', session_id=self.session), inspect_result, read_chunk]))
         self.incoming('读取长结果')
-        self.assertEqual(self.reply(), '结果较长，已截取')
+        self.assertEqual(self.reply(), '长结果已按需读取')
 
     def test_online_host_without_send_capability_cannot_receive_commands(self):
         self.agent_component.store.snapshot('fixture', 'host', 'fixture-a62bc0', canSend=False)
@@ -274,40 +322,8 @@ class WeixinAgentEndToEndTests(unittest.TestCase):
         self.assertEqual(self.host.commands, [])
 
     @unittest.skipUnless(os.environ.get('POLARIS_WEIXIN_LIVE_MODEL') == '1', 'Opt-in real DeepSeek acceptance')
-    def test_real_model_forwards_answer_and_previous_text_without_reconfirmation(self):
-        from polaris_weixin.model import DeepSeek
-        wait = self.wait
-        self.wait = lambda predicate, timeout=100: wait(predicate,timeout)
-        self.enable(DeepSeek())
-        self.agent_component.mark(self.session)
-        self.agent_component.store.snapshot('fixture','host','fixture-a62bc0',title='合成验收会话 SAMPLE-001',canSend=True)
-        body='合成测试正文：我在考虑给演示项目增加一个天气面板，用说明文件记录设计，因为示例客户端不方便整理任务'
-        question=[{'role':'user','content':'给合成验收会话 SAMPLE-001 发送消息'},
-                  {'role':'assistant','content':'目标已标记且在线。需要我发什么内容？请给出文本，并说明用开始新一轮（start）还是补充当前一轮（steer）。'}]
-        revised='合成测试正文：暂缓增加面板，先整理演示目录。'
-        cases=[(question,'start，'+body,body),
-               (question+[{'role':'user','content':'start，'+body},
-                          {'role':'assistant','content':'你这个想法是在讨论架构方向；请提供具体正文和目标，我再执行。'}],
-                '我让你直接发给合成验收会话 SAMPLE-001',body),
-               (question+[{'role':'user','content':'新起一轮，正文是：'+body},
-                          {'role':'assistant','content':'已了解目标和正文。'}],
-                '目标不变，正文改为“'+revised+'”，现在发送。',revised)]
-        for index,(history,prompt,expected) in enumerate(cases,1):
-            self.component.agent.history=history
-            self.incoming(prompt)
-            reply=self.reply(index)
-            self.assertEqual(len(self.host.commands),index,reply)
-            command=self.host.commands[-1]
-            self.assertEqual(command['mode'],'start',reply)
-            self.assertEqual(command['text'],expected,reply)
-        self.component.agent.history=question+[{'role':'user','content':'start，'+body}]
-        self.incoming('先不要发送，我只是想讨论演示面板使用蓝色还是灰色，简短说说你的看法。')
-        reply=self.reply(len(cases)+1)
-        self.assertEqual(len(self.host.commands),len(cases),reply)
-
-    @unittest.skipUnless(os.environ.get('POLARIS_WEIXIN_LIVE_MODEL') == '1', 'Opt-in real DeepSeek acceptance')
     def test_real_model_multiturn_queries_marks_sends_and_unmarks(self):
-        from polaris_weixin.model import DeepSeek
+        from components.assistant.model import DeepSeek
         wait = self.wait
         self.wait = lambda predicate, timeout=100: wait(predicate, timeout)
         self.enable(DeepSeek())

@@ -114,6 +114,7 @@ class Client:
         self.credentials, self.chats = credentials, chats
         self.transport = transport or Transport()
         self.changed = changed or (lambda: None)
+        self.attachments = None
         self.on_text = lambda text, timestamp: None
         self.on_invalidate = lambda: None
         self.on_account_changed = lambda: None
@@ -159,7 +160,8 @@ class Client:
                         hasAccount=bool(self.account), canRelogin=bool(self.account.get('expired')), accountId=self.account.get('botId', ''),
                         userId=self.account.get('userId', ''), qrContent=self.qr,
                         canSend=self.state == 'connected' and not self.account.get('expired') and bool(self.context) and not self.sending,
-                        sending=self.sending, messages=[dict(r) for r in self.messages])
+                        sending=self.sending, messages=[dict(r) for r in self.messages],
+                        attachments=self.attachments.catalog((self.account.get('botId'),self.account.get('userId'))) if self.attachments else [])
 
     def notify(self):
         if not self.stopped:
@@ -382,7 +384,8 @@ class Client:
         if not isinstance(items, list):
             return
         parts = [item['text_item']['text'][:8000] for item in items[:100] if isinstance(item, dict) and item.get('type') == 1 and isinstance(item.get('text_item'), dict) and isinstance(item['text_item'].get('text'), str)]
-        if not parts:
+        media = [item for item in items[:100] if isinstance(item, dict) and item.get('type') in (2, 4)]
+        if not parts and not media:
             return
         context = row.get('context_token')
         if isinstance(context, str) and 0 < len(context) <= 16384:
@@ -393,8 +396,38 @@ class Client:
         while len(self.seen) > 512:
             self.seen.popitem(last=False)
         text = '\n'.join(parts)[:8000]
+        timestamp = message_timestamp(row, items)
+        if media and self.attachments is not None:
+            account = (self.account.get('botId'), self.account.get('userId'))
+            identifiers = self.attachments.register(identity, items, account)
+            self.append(identity, text + ('\n' if text else '') + f'[正在保存 {len(identifiers)} 个附件]', 'in', '已接收')
+            def save_media(generation, cancel):
+                lines = [text] if text else []
+                for attachment_id in identifiers:
+                    try:
+                        saved = self.attachments.save(attachment_id, account, cancel)
+                        lines.append(f'[附件 {saved["name"]}，{saved["size"]} 字节，本地路径：{saved["path"]}]')
+                    except InterruptedError:
+                        return
+                    except Exception as error:
+                        # Never expose CDN parameters or encryption keys in model input.
+                        lines.append('[附件保存失败：' + (str(error) if isinstance(error, ValueError) else type(error).__name__)[:160] + ']')
+                if not identifiers: lines.append('[附件格式不支持或缺少下载信息]')
+                content = '\n'.join(lines)[:8000]
+                with self._lock:
+                    if not self.active(generation) or account != (self.account.get('botId'), self.account.get('userId')): return
+                    for message in self.messages:
+                        if message['id'] == identity: message['text'] = content
+                    self.persist()
+                    self.on_text(content, timestamp)
+                    self.notify()
+            try:
+                self.worker(save_media)
+            except PlatformError:
+                self.warning = '附件处理繁忙，请稍后重新发送'
+            return
         self.append(identity, text, 'in', '已接收')
-        self.on_text(text, message_timestamp(row, items))
+        self.on_text(text, timestamp)
 
     def append(self, identity, text, direction, status):
         self.messages.append(dict(id=identity, text=text, direction=direction, status=status, time=datetime.now().strftime('%H:%M')))

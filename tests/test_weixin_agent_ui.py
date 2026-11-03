@@ -70,8 +70,8 @@ if __name__ == '__main__' and sys.argv[-1] == 'qt':
     check_switch(False)
     ctx.settings['hasKey'] = False
     bridge.refresh(); QTest.qWait(30)
-    assert not toggle.property('enabled')
-    assert track.property('opacity') == 0.4
+    assert toggle.property('enabled')
+    assert track.property('opacity') == 1.0
     ctx.settings['hasKey'] = True
     bridge.refresh(); QTest.qWait(30)
     assert track.property('opacity') == 1.0

@@ -63,7 +63,7 @@ Rectangle {
             Switch {
                 objectName: "weixinAgentToggle"
                 text: "自动回复"; font.pixelSize: 11; padding: 0; spacing: 3
-                enabled: root.agent.hasKey === true || root.agent.desiredEnabled === true
+                enabled: root.agent.busy !== true
                 checked: root.agent.desiredEnabled === true
                 indicator: Rectangle {
                     objectName: "weixinAgentToggleTrack"
@@ -100,8 +100,8 @@ Rectangle {
         ColumnLayout {
             visible: root.agentOpen
             Layout.fillWidth: true; Layout.fillHeight: true; spacing: 3
-            Label { text: "使用 DeepSeek，将发送新收到的文字及工具结果"; font.pixelSize: 10; wrapMode: Text.Wrap; Layout.fillWidth: true; color: "#6c7479" }
-            Label { objectName: "weixinAgentKeyNotice"; visible: !root.agent.hasKey; text: "缺少 DEEPSEEK_API_KEY，请配置后重启组件"; font.pixelSize: 10; color: "#88613e"; wrapMode: Text.Wrap; Layout.fillWidth: true }
+            Label { text: "使用 " + (root.agent.model || "所选模型") + "，将发送新收到的文字及工具结果"; font.pixelSize: 10; wrapMode: Text.Wrap; Layout.fillWidth: true; color: "#6c7479" }
+            Label { objectName: "weixinAgentKeyNotice"; visible: root.agent.ready === false; text: root.agent.detail || "自动回复暂未就绪"; font.pixelSize: 10; color: "#88613e"; wrapMode: Text.Wrap; Layout.fillWidth: true }
             ListView {
                 objectName: "weixinAgentOperations"; Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 5
                 model: root.componentCatalog
